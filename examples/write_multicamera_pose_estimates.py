@@ -1,12 +1,23 @@
 """
 Example: write 3D multi-camera pose estimates to NWB using MultiCameraPoseEstimation.
 
-This demonstrates a DANNCE-style workflow:
-  - Multiple synchronized cameras record the same animal.
-  - Camera intrinsic and extrinsic calibration parameters are stored in a CameraCalibration object.
-  - Each camera has its own CameraView that links the device and its source video.
-  - A 3D triangulation algorithm produces world-space (x, y, z) coordinates for
-    each body-part landmark, stored as PoseEstimationSeries inside MultiCameraPoseEstimation.
+This demonstrates a (s)DANNCE-style workflow where only the triangulated 3D pose is
+available, with no per-camera 2D estimates:
+  - Multiple synchronized cameras record the same animal. Each camera is a CalibratedCamera
+    (a Device extended with intrinsic/extrinsic calibration parameters), added once to the
+    NWBFile so it can be shared by reference (e.g., across subjects in a multi-subject
+    sDANNCE session) without duplicating the rig.
+  - Each camera is still represented by its own PoseEstimation object, which links to that
+    camera device and its source video. Since DANNCE/sDANNCE does not output per-camera 2D
+    keypoints, these PoseEstimation objects hold no PoseEstimationSeries children (this is
+    valid: PoseEstimationSeries is optional, zero-or-more, in PoseEstimation) - they exist to
+    record device/video provenance for each camera view.
+  - A 3D triangulation algorithm produces world-space (x, y, z) coordinates for each body-part
+    landmark, stored as PoseEstimationSeries directly inside MultiCameraPoseEstimation.
+
+For a workflow where 2D per-camera estimates ARE available (e.g., Anipose running
+DeepLabCut per camera before triangulating), simply pass `pose_estimation_series` to each
+per-camera PoseEstimation as well.
 
 Run with:
     python write_multicamera_pose_estimates.py
@@ -16,13 +27,14 @@ import datetime
 
 import numpy as np
 from pynwb import NWBHDF5IO, NWBFile
+from pynwb.device import DeviceModel
 from pynwb.file import Subject
 from pynwb.image import ImageSeries
 
 from ndx_pose import (
-    CameraCalibration,
-    CameraView,
+    CalibratedCamera,
     MultiCameraPoseEstimation,
+    PoseEstimation,
     PoseEstimationSeries,
     Skeleton,
     Skeletons,
@@ -41,80 +53,75 @@ subject = Subject(subject_id="mouse001", species="Mus musculus", sex="M")
 nwbfile.subject = subject
 
 # ---------------------------------------------------------------------------
-# 2. Add camera devices (must be in NWBFile before linking)
+# 2. Add calibrated camera devices (must be in NWBFile before linking).
+#    Each CalibratedCamera carries its own intrinsic/extrinsic calibration, so there is no
+#    row-order matching against a separate calibration object, and the same camera can be
+#    linked from multiple PoseEstimation objects (e.g., one per subject in a multi-subject
+#    session) without duplicating the rig.
+#    A CalibratedCamera is a Device, so it accepts the full Device metadata, including a link
+#    to a DeviceModel shared by all cameras of the same make and model.
 # ---------------------------------------------------------------------------
-camera1 = nwbfile.create_device(
-    name="camera1",
-    description="Basler acA1300 — lateral view, left side",
+rng = np.random.default_rng(0)
+
+camera_model = DeviceModel(
+    name="acA1300",
     manufacturer="Basler",
+    model_number="acA1300-200um",
+    description="Basler ace USB 3.0 monochrome camera.",
 )
-camera2 = nwbfile.create_device(
-    name="camera2",
-    description="Basler acA1300 — lateral view, right side",
-    manufacturer="Basler",
-)
-camera3 = nwbfile.create_device(
-    name="camera3",
-    description="Basler acA1300 — top-down view",
-    manufacturer="Basler",
-)
-devices = [camera1, camera2, camera3]
-n_cameras = len(devices)
+nwbfile.add_device_model(camera_model)
+
+camera_names = ["camera1", "camera2", "camera3"]
+camera_descriptions = [
+    "Lateral view, left side",
+    "Lateral view, right side",
+    "Top-down view",
+]
+camera_serial_numbers = ["SN-0001", "SN-0002", "SN-0003"]
+cameras = []
+for name, description, serial_number in zip(camera_names, camera_descriptions, camera_serial_numbers):
+    intrinsic_matrix = np.eye(3, dtype="float32")
+    intrinsic_matrix[0, 0] = 800.0  # fx
+    intrinsic_matrix[1, 1] = 800.0  # fy
+    intrinsic_matrix[0, 2] = 640.0  # cx
+    intrinsic_matrix[1, 2] = 512.0  # cy
+    camera = CalibratedCamera(
+        name=name,
+        description=description,
+        model=camera_model,
+        serial_number=serial_number,
+        intrinsic_matrix=intrinsic_matrix,
+        rotation_matrix=np.eye(3, dtype="float32"),
+        translation_vector=rng.standard_normal(3).astype("float32"),
+        distortion_coefficients=np.zeros(5, dtype="float32"),
+    )
+    nwbfile.add_device(camera)
+    cameras.append(camera)
 
 # ---------------------------------------------------------------------------
-# 3. Store source videos in acquisition (one ImageSeries per camera)
-#    CameraView will link to these rather than embedding them.
+# 3. Store source videos in acquisition (one ImageSeries per camera).
+#    Each per-camera PoseEstimation will link to one of these.
 # ---------------------------------------------------------------------------
 frame_rate = 30.0  # Hz
+n_frames = 1000
 source_videos = []
-for cam in devices:
+for camera in cameras:
     video = ImageSeries(
-        name=cam.name,
-        description=f"Source video from {cam.name}.",
+        name=f"{camera.name}_video",
+        description=f"Source video from {camera.name}.",
         unit="NA",
         format="external",
-        external_file=[f"path/to/{cam.name}.mp4"],
+        external_file=[f"path/to/{camera.name}.mp4"],
         dimension=[1280, 1024],
         starting_frame=[0],
         rate=frame_rate,
+        num_samples=n_frames,
     )
     nwbfile.add_acquisition(video)
     source_videos.append(video)
 
 # ---------------------------------------------------------------------------
-# 4. Camera calibration
-#    Row order of every dataset must match the order of `devices`.
-# ---------------------------------------------------------------------------
-rng = np.random.default_rng(0)
-
-intrinsic = np.tile(np.eye(3, dtype="float32"), (n_cameras, 1, 1))
-intrinsic[:, 0, 0] = 800.0   # fx
-intrinsic[:, 1, 1] = 800.0   # fy
-intrinsic[:, 0, 2] = 640.0   # cx
-intrinsic[:, 1, 2] = 512.0   # cy
-
-calibration = CameraCalibration(
-    intrinsic_matrix=intrinsic,
-    rotation_matrix=np.tile(np.eye(3, dtype="float32"), (n_cameras, 1, 1)),
-    translation_vector=rng.standard_normal((n_cameras, 3)).astype("float32"),
-    distortion_coefficients=np.zeros((n_cameras, 5), dtype="float32"),
-    devices=devices,
-)
-
-# ---------------------------------------------------------------------------
-# 5. Build one CameraView per camera
-# ---------------------------------------------------------------------------
-camera_views = [
-    CameraView(
-        name=cam.name,
-        device=cam,
-        source_video=vid,
-    )
-    for cam, vid in zip(devices, source_videos)
-]
-
-# ---------------------------------------------------------------------------
-# 6. Define the skeleton
+# 4. Define the skeleton
 # ---------------------------------------------------------------------------
 skeleton = Skeleton(
     name="mouse001_skeleton",
@@ -125,16 +132,34 @@ skeleton = Skeleton(
 skeletons = Skeletons(skeletons=[skeleton])
 
 # ---------------------------------------------------------------------------
-# 7. Simulate 3D pose estimation output
-#    DANNCE produces (n_frames, 3) arrays in millimetres (world space).
+# 5. Build one PoseEstimation per camera to record that camera's device/video provenance.
+#    sDANNCE does not produce per-camera 2D keypoints, so these have no PoseEstimationSeries
+#    children - only the device and source_video links are set. This is valid because
+#    PoseEstimationSeries is optional (zero or more) in PoseEstimation.
 # ---------------------------------------------------------------------------
-n_frames = 1000
 timestamps = np.arange(n_frames) / frame_rate  # seconds
 
-reference_frame = "(0, 0, 0) is the geometric centre of the DANNCE camera rig."
+pose_estimations = [
+    PoseEstimation(
+        name=f"PoseEstimation_{camera.name}",
+        description=f"Camera view {camera.name}; no 2D keypoints, only used for 3D triangulation.",
+        source_software="sDANNCE",
+        source_software_version="1.0.0",
+        device=camera,
+        source_video=video,
+    )
+    for camera, video in zip(cameras, source_videos)
+]
+
+# ---------------------------------------------------------------------------
+# 6. Simulate 3D pose estimation output.
+#    sDANNCE triangulates directly from the raw multi-camera video (no intermediate
+#    per-camera 2D keypoints) into (n_frames, 3) arrays in millimeters (world space).
+# ---------------------------------------------------------------------------
+reference_frame = "(0, 0, 0) is the geometric center of the sDANNCE camera rig."
 confidence_definition = "Maximum probability from the 3D volumetric heatmap."
 
-pose_estimation_series = []
+pose_estimation_series_3d = []
 for node in skeleton.nodes:
     data = rng.standard_normal((n_frames, 3)).astype("float32") * 10  # mm
     confidence = rng.random(n_frames).astype("float32")
@@ -144,39 +169,39 @@ for node in skeleton.nodes:
         data=data,
         unit="millimeters",
         reference_frame=reference_frame,
-        timestamps=timestamps if node == skeleton.nodes[0] else pose_estimation_series[0],
+        timestamps=timestamps if node == skeleton.nodes[0] else pose_estimation_series_3d[0],
         confidence=confidence,
         confidence_definition=confidence_definition,
     )
-    pose_estimation_series.append(pes)
+    pose_estimation_series_3d.append(pes)
 
 # ---------------------------------------------------------------------------
-# 8. Build MultiCameraPoseEstimation
+# 7. Build MultiCameraPoseEstimation, combining the 3D estimates and the per-camera
+#    PoseEstimation objects.
 # ---------------------------------------------------------------------------
 mcpe = MultiCameraPoseEstimation(
     name="MultiCameraPoseEstimation",
-    pose_estimation_series=pose_estimation_series,
-    camera_views=camera_views,
-    calibration=calibration,
-    description="3D keypoint coordinates of mouse001 estimated by DANNCE.",
-    scorer="DANNCE",
-    source_software="DANNCE",
-    source_software_version="2.0.0",
+    pose_estimation_series=pose_estimation_series_3d,
+    pose_estimations=pose_estimations,
+    description="3D keypoint coordinates of mouse001 estimated by sDANNCE.",
+    scorer="sDANNCE",
+    source_software="sDANNCE",
+    source_software_version="1.0.0",
     skeleton=skeleton,
 )
 
 # ---------------------------------------------------------------------------
-# 9. Add everything to a behaviour processing module
+# 8. Add everything to a behavior processing module
 # ---------------------------------------------------------------------------
 behavior_pm = nwbfile.create_processing_module(
     name="behavior",
-    description="Processed behavioral data — 3D pose estimation.",
+    description="Processed behavioral data - 3D pose estimation.",
 )
 behavior_pm.add(skeletons)
 behavior_pm.add(mcpe)
 
 # ---------------------------------------------------------------------------
-# 10. Write to disk and read back
+# 9. Write to disk and read back
 # ---------------------------------------------------------------------------
 path = "test_multicamera_pose.nwb"
 
@@ -190,15 +215,16 @@ with NWBHDF5IO(path, mode="r", load_namespaces=True) as io:
     read_mcpe = read_nwbfile.processing["behavior"]["MultiCameraPoseEstimation"]
 
     print(read_mcpe)
-    print(f"  source_software : {read_mcpe.source_software} {read_mcpe.source_software_version}")
-    print(f"  body parts      : {list(read_mcpe.pose_estimation_series.keys())}")
-    print(f"  camera views    : {list(read_mcpe.camera_views.keys())}")
-    print(f"  skeleton nodes  : {list(read_mcpe.skeleton.nodes)}")
+    print(f"  source_software  : {read_mcpe.source_software} {read_mcpe.source_software_version}")
+    print(f"  3D body parts    : {list(read_mcpe.pose_estimation_series.keys())}")
+    print(f"  camera views     : {list(read_mcpe.pose_estimations.keys())}")
+    print(f"  skeleton nodes   : {list(read_mcpe.skeleton.nodes)}")
 
-    cal = read_mcpe.calibration
-    print(f"  calibration     : intrinsic_matrix shape = {cal.intrinsic_matrix.shape}")
-    print(f"  calibration devices : {[d.name for d in cal.devices]}")
-
-    cv1 = read_mcpe.camera_views["camera1"]
-    print(f"  camera1 device  : {cv1.device.name}")
-    print(f"  camera1 video   : {cv1.source_video.external_file[0]}")
+    pe1 = read_mcpe.pose_estimations["PoseEstimation_camera1"]
+    camera1 = pe1.device
+    print(f"  camera1 device        : {camera1.name}")
+    print(f"  camera1 model         : {camera1.model.name} ({camera1.model.manufacturer})")
+    print(f"  camera1 serial number : {camera1.serial_number}")
+    print(f"  camera1 intrinsic     : {camera1.intrinsic_matrix[:]}")
+    print(f"  camera1 video         : {pe1.source_video.external_file[0]}")
+    print(f"  camera1 2D keypoints  : {len(pe1.pose_estimation_series)} (none for sDANNCE)")

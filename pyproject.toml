@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ndx-pose"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
     { name="Ryan Ly", email="rly@lbl.gov" },
     { name="Ben Dichter", email="bdichter@lbl.gov" },
@@ -15,6 +15,7 @@ authors = [
     { name="Talmo Pereira", email="talmo@salk.edu" },
     { name="Elizabeth Berrigan", email="eberrigan@salk.edu" },
     { name="Paul Adkisson", email="paul.adkisson@catalystneuro.com" },
+    { name="Alessandra Trapani", email="alessandra.trapani@catalystneuro.com" },
 ]
 description = "NWB extension to store pose estimation data"
 readme = "README.md"
@@ -39,8 +40,8 @@ keywords = [
     'ndx-extension',
 ]
 dependencies = [
-    "pynwb>=2.6.0",
-    "hdmf>=3.13.0",
+    "pynwb>=4.0.0",
+    "hdmf>=6.1.0",
 ]
 
 # Dependency groups (PEP 735) - for development, not published to PyPI
@@ -65,9 +66,8 @@ dev = [
 ]
 # minimum requirements of project dependencies for testing on Python 3.10 (see .github/workflows/run_all_tests.yml)
 min-reqs = [
-    "pynwb==2.6.0; python_version == '3.10'",
-    "hdmf==3.13.0; python_version == '3.10'",
-    "numpy<2; python_version == '3.10'",
+    "pynwb==4.0.0; python_version == '3.10'",
+    "hdmf==6.1.0; python_version == '3.10'",
 ]
 
 [project.urls]

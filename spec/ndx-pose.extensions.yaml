@@ -77,8 +77,11 @@ groups:
     neurodata_type_inc: NWBDataInterface
     default_name: PoseEstimation
     doc: Group that holds estimated position data for multiple body parts,
-      computed from the same video with the same tool/algorithm. The timestamps of
-      each child PoseEstimationSeries type should be the same.
+      computed from a single camera view with the same tool/algorithm. The
+      timestamps of each child PoseEstimationSeries type should be the same. To
+      store pose estimates from multiple synchronized cameras (e.g., triangulated
+      3D estimates), use a MultiCameraPoseEstimation object, which holds one
+      PoseEstimation child per camera view alongside the shared 3D estimates.
     datasets:
       - name: description
         dtype: text
@@ -91,10 +94,9 @@ groups:
         shape:
           - null
         doc:
-          Paths to the original video files. The number of files should equal the
-          number of camera devices. Note that these string paths might be fragile
-          unless relative paths are used and care is taken to keep them consistent.
-          Consider using the 'source_video' link instead for a formal reference.
+          DEPRECATED. Please use the 'source_video' link instead. Paths to the
+          original video files. Note that these string paths might be fragile unless
+          relative paths are used and care is taken to keep them consistent.
         quantity: "?"
       - name: labeled_videos
         dtype: text
@@ -103,10 +105,9 @@ groups:
         shape:
           - null
         doc:
-          Paths to the labeled video files. The number of files should equal the
-          number of camera devices. Note that these string paths might be fragile
-          unless relative paths are used and care is taken to keep them consistent.
-          Consider using the 'labeled_video' link instead for a formal reference.
+          DEPRECATED. Please use the 'labeled_video' link instead. Paths to the
+          labeled video files. Note that these string paths might be fragile unless
+          relative paths are used and care is taken to keep them consistent.
         quantity: "?"
       - name: dimensions
         dtype: uint8
@@ -116,7 +117,10 @@ groups:
         shape:
           - null
           - 2
-        doc: Dimensions of each labeled video file.
+        doc:
+          DEPRECATED. Please use the 'dimension' field of the ImageSeries linked
+          as 'source_video' or 'labeled_video' instead. Dimensions of each labeled
+          video file.
         quantity: "?"
       - name: scorer
         dtype: text
@@ -140,24 +144,30 @@ groups:
       - target_type: Skeleton
         doc: Layout of body part locations and connections.
         quantity: "?"
-      - target_type: Device
-        doc: Cameras used to record the videos.
-        quantity: "*"
+      - name: device
+        target_type: Device
+        doc:
+          The camera device used to record the video for this pose estimation.
+          Must be added to the NWBFile before being linked here. Use a
+          CalibratedCamera instead of a plain Device when intrinsic/extrinsic
+          calibration coordinates are available, e.g., for multi-camera 3D pose
+          estimation, where a PoseEstimation object represents a single camera view
+          within a MultiCameraPoseEstimation object.
+        quantity: "?"
       - name: source_video
         target_type: ImageSeries
         doc: Link to an ImageSeries containing the source video used for pose
           estimation. The ImageSeries should be stored in the NWBFile (e.g., in
-          acquisition). When available, this field should be preferred over
-          'original_videos' as it provides a formal reference rather than a file
-          path string.
+          acquisition). It holds the video data, or the path to an external video
+          file, along with the dimensions and frame timing of the video.
         quantity: "?"
       - name: labeled_video
         target_type: ImageSeries
         doc: Link to an ImageSeries containing the labeled video (with pose
           estimation overlays) produced from the source video. The ImageSeries
-          should be stored in the NWBFile (e.g., in acquisition). When available,
-          this field should be preferred over 'labeled_videos' as it provides a
-          formal reference rather than a file path string.
+          should be stored in the NWBFile (e.g., in acquisition). It holds the video
+          data, or the path to an external video file, along with the dimensions and
+          frame timing of the video.
         quantity: "?"
   - neurodata_type_def: TrainingFrame
     neurodata_type_inc: NWBDataInterface
@@ -287,104 +297,69 @@ groups:
         neurodata_type_inc: SourceVideos
         doc: Organizational group to hold source videos used for training.
         quantity: "?"
-  - neurodata_type_def: CameraCalibration
-    neurodata_type_inc: NWBDataInterface
-    default_name: calibration
-    doc:
-      Intrinsic and extrinsic calibration parameters for the cameras used in a
-      multi-camera pose estimation setup. Each row of every dataset corresponds to
-      one camera. The row order must match the order of linked Device objects.
+  - neurodata_type_def: CalibratedCamera
+    neurodata_type_inc: Device
+    doc: A Device representing a single camera in a multi-camera pose estimation
+      setup, extended with its intrinsic and extrinsic calibration parameters.
+      Link a CalibratedCamera (instead of a plain Device) from a PoseEstimation
+      object wherever calibration coordinates are available. Because it is a
+      Device, it is added once to the NWBFile (e.g., in general/devices) and can
+      be linked to by reference from multiple PoseEstimation objects (e.g., one
+      per subject in a multi-subject recording session), so the camera rig and its
+      calibration are never duplicated.
     datasets:
       - name: intrinsic_matrix
         dtype: float32
         dims:
-          - num_cameras
-          - 3
-          - 3
+          - dim_0
+          - dim_1
         shape:
-          - null
           - 3
           - 3
         doc:
-          Intrinsic camera matrix K for each camera, encoding focal length and
-          principal point. Shape (n_cameras, 3, 3).
+          Intrinsic camera matrix K, encoding focal length and principal point.
+          Shape (3, 3).
       - name: rotation_matrix
         dtype: float32
         dims:
-          - num_cameras
-          - 3
-          - 3
+          - dim_0
+          - dim_1
         shape:
-          - null
           - 3
           - 3
         doc:
-          Rotation matrix R mapping world coordinates to each camera's coordinate
-          frame. Shape (n_cameras, 3, 3).
+          Rotation matrix R mapping world coordinates to this camera's coordinate
+          frame. Shape (3, 3).
         quantity: "?"
       - name: translation_vector
         dtype: float32
         dims:
-          - num_cameras
-          - 3
+          - x, y, z
         shape:
-          - null
           - 3
-        doc:
-          Translation vector t mapping world coordinates to each camera's coordinate
-          frame. Shape (n_cameras, 3).
+        doc: Translation vector t mapping world coordinates to this camera's
+          coordinate frame. Shape (3,).
         quantity: "?"
       - name: distortion_coefficients
         dtype: float32
         dims:
-          - num_cameras
           - num_distortion_params
         shape:
           - null
-          - null
-        doc:
-          Lens distortion coefficients for each camera. Shape (n_cameras, N) where
-          N depends on the distortion model (typically 4 or 5 for radial-tangential).
-        quantity: "?"
-    links:
-      - target_type: Device
-        doc:
-          Camera devices corresponding to the rows of the calibration datasets.
-          The order must match the row order of intrinsic_matrix and other datasets.
-        quantity: "*"
-  - neurodata_type_def: CameraView
-    neurodata_type_inc: NWBDataInterface
-    doc:
-      Data associated with a single camera in a multi-camera pose estimation setup.
-      Links to the camera device and, optionally, to its source video stored elsewhere
-      in the NWBFile. May also hold per-camera 2D pose estimates in pixel space.
-    groups:
-      - neurodata_type_inc: PoseEstimationSeries
-        doc:
-          Estimated 2D position (x, y) of each body part in this camera's pixel
-          coordinate frame. Omit if only 3D world-space estimates are stored.
-        quantity: "*"
-    links:
-      - name: device
-        target_type: Device
-        doc:
-          The camera device used to record this view. Must be added to the NWBFile
-          before being linked here.
-      - name: source_video
-        target_type: ImageSeries
-        doc:
-          Link to the ImageSeries (e.g. stored in acquisition) containing the source
-          video from this camera.
+        doc: Lens distortion coefficients for this camera. Length depends on the
+          distortion model (typically 4 or 5 for radial-tangential).
         quantity: "?"
   - neurodata_type_def: MultiCameraPoseEstimation
     neurodata_type_inc: NWBDataInterface
     default_name: MultiCameraPoseEstimation
-    doc:
-      Group that holds 3D pose estimation data computed from multiple synchronized
-      cameras. Unlike PoseEstimation (single-camera, pixel-space), this type stores
-      keypoints in a shared 3D world-space reference frame and organises per-camera
-      data through CameraView children. Designed for systems such as DANNCE or
-      Anipose that triangulate 3D positions from synchronized multi-camera footage.
+    doc: Group that holds 3D pose estimation data computed from multiple
+      synchronized cameras. Unlike PoseEstimation (single-camera, pixel-space),
+      this type stores keypoints in a shared 3D world-space reference frame and
+      organizes per-camera 2D data through PoseEstimation children, one per camera
+      view, each of which links to the camera Device (typically a
+      CalibratedCamera, so that calibration travels with the camera rather than
+      being duplicated here). Designed for systems such as DANNCE or Anipose that
+      triangulate 3D positions from synchronized multi-camera footage.
     datasets:
       - name: description
         dtype: text
@@ -396,9 +371,8 @@ groups:
         quantity: "?"
       - name: source_software
         dtype: text
-        doc:
-          Name of the software tool used. Specifying the version attribute is strongly
-          encouraged.
+        doc: Name of the software tool used. Specifying the version attribute is
+          strongly encouraged.
         quantity: "?"
         attributes:
           - name: version
@@ -407,23 +381,20 @@ groups:
             required: false
     groups:
       - neurodata_type_inc: PoseEstimationSeries
-        doc:
-          Estimated 3D position (x, y, z) of each body part in a shared world-space
-          coordinate frame. The unit should be a physical length unit (e.g. 'meters'
-          or 'millimeters'), not 'pixels'.
+        doc: Estimated 3D position (x, y, z) of each body part in a shared
+          world-space coordinate frame. The unit should be a physical length unit
+          (e.g. 'meters' or 'millimeters'), not 'pixels'.
         quantity: "*"
-      - neurodata_type_inc: CameraView
+      - neurodata_type_inc: PoseEstimation
         doc:
-          Per-camera data, one CameraView per camera. Each CameraView links to a
-          device and optionally to its source video and 2D estimates.
+          Per-camera 2D pose estimates, one PoseEstimation per camera view. Each
+          PoseEstimation links to the camera Device (ideally a CalibratedCamera)
+          used to record that view and, optionally, to that view's source video and
+          2D pose estimates in pixel space.
         quantity: "*"
-      - name: calibration
-        neurodata_type_inc: CameraCalibration
-        doc: Intrinsic and extrinsic calibration parameters for all cameras.
-        quantity: "?"
     links:
       - target_type: Skeleton
-        doc:
-          Layout of body part locations and connections. The Skeleton object should
-          be placed in a Skeletons object at the same level as this container.
+        doc: Layout of body part locations and connections. The Skeleton object
+          should be placed in a Skeletons object at the same level as this
+          container.
         quantity: "?"
